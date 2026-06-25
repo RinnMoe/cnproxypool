@@ -6,4 +6,4 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "proxy_pool_hub"
-database_id = "replace-with-cloudflare-d1-database-id"
+database_id = "6a1be8ea-c3af-4ab1-b37f-f9a1db9d18e4"
