@@ -9,6 +9,7 @@ Created by vibe coding
 - D1 持久化，适合 Cloudflare Pages Functions 部署
 - 按 `host:port` 去重
 - 记录健康状态、检测延迟和上次测试时间
+- 常用只读 API 使用 60 秒边缘缓存，减少 D1 读取量
 
 
 项目结构：

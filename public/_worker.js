@@ -6,6 +6,8 @@ const HEALTH_TIMEOUT_MS = 6000;
 const MAX_HEALTH_CHECKS = 500;
 const MAX_REFRESH_SOURCES_PER_TICK = 2;
 const SOURCE_CUSTOM_PREFIX = "custom_url:";
+const API_CACHE_SECONDS = 60;
+const CACHEABLE_GET_PATHS = new Set(["/api/v1/stats", "/api/v1/proxies", "/api/v1/proxies/select"]);
 
 const BUILTIN_SOURCES = [
   { key: "ip3366_free", name: "IP3366 Free", type: "builtin", url: "http://www.ip3366.net/free/?stype=1", refresh_interval_seconds: 1800, timeout_seconds: 8 },
@@ -30,25 +32,31 @@ export default {
       if (!url.pathname.startsWith("/api/")) {
         return env.ASSETS.fetch(request);
       }
+      const path = normalizePath(url.pathname);
+      if (path === "/api/v1/health" && request.method === "GET") {
+        return json({ status: "ok", version: VERSION });
+      }
+      if (request.method === "GET" && isCacheableApiRequest(path, url.searchParams)) {
+        const cached = await cachedApiResponse(request);
+        if (cached) return cached;
+      }
       await ensureSchema(env);
       await ensureConfiguredSources(env);
-      if (request.method === "GET") {
-        ctx.waitUntil(runMaintenanceIfDue(env));
+      if (request.method === "GET") ctx.waitUntil(runMaintenanceIfDue(env));
+      const response = await routeRequest(request, env, ctx, path);
+      if (request.method === "GET" && isCacheableApiRequest(path, url.searchParams)) {
+        ctx.waitUntil(cacheApiResponse(request, response));
       }
-      return await routeRequest(request, env, ctx);
+      return response;
     } catch (error) {
       return json({ detail: error.message || String(error) }, 500);
     }
   },
 };
 
-async function routeRequest(request, env) {
+async function routeRequest(request, env, ctx, pathOverride = "") {
   const url = new URL(request.url);
-  const path = url.pathname.replace(/\/+$/, "") || "/";
-
-  if (path === "/api/v1/health" && request.method === "GET") {
-    return json({ status: "ok", version: VERSION });
-  }
+  const path = pathOverride || normalizePath(url.pathname);
   if (path === "/api/v1/sources" && request.method === "GET") {
     return json({ items: await listSources(env) });
   }
@@ -67,17 +75,60 @@ async function routeRequest(request, env) {
     return json({ item });
   }
   if (path === "/api/v1/refresh" && request.method === "POST") {
-    return json(await refreshAll(env, await readJson(request)));
+    const response = json(await refreshAll(env, await readJson(request)));
+    ctx.waitUntil(clearCommonApiCache(request));
+    return response;
   }
   if (path.startsWith("/api/v1/refresh/") && request.method === "POST") {
     const key = decodeURIComponent(path.slice("/api/v1/refresh/".length));
-    return json(await refreshOne(env, key, await readJson(request)));
+    const response = json(await refreshOne(env, key, await readJson(request)));
+    ctx.waitUntil(clearCommonApiCache(request));
+    return response;
   }
   if (path === "/api/v1/check" && request.method === "POST") {
     const body = await readJson(request);
-    return json(await checkHealth(env, Number(body.max_checks || MAX_HEALTH_CHECKS)));
+    const response = json(await checkHealth(env, Number(body.max_checks || MAX_HEALTH_CHECKS)));
+    ctx.waitUntil(clearCommonApiCache(request));
+    return response;
   }
   return json({ detail: "not found" }, 404);
+}
+
+function normalizePath(pathname) {
+  return pathname.replace(/\/+$/, "") || "/";
+}
+
+function isCacheableApiRequest(path, params) {
+  if (!CACHEABLE_GET_PATHS.has(path)) return false;
+  return path !== "/api/v1/proxies/select" || (params.get("strategy") || "fastest") !== "random";
+}
+
+async function cachedApiResponse(request) {
+  const response = await caches.default.match(cacheRequest(request));
+  if (!response) return null;
+  const headers = new Headers(response.headers);
+  headers.set("X-Cache", "HIT");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+async function cacheApiResponse(request, response) {
+  if (response.status !== 200) return;
+  const headers = new Headers(response.headers);
+  headers.set("Cache-Control", `public, max-age=${API_CACHE_SECONDS}`);
+  headers.set("X-Cache", "MISS");
+  await caches.default.put(cacheRequest(request), new Response(await response.clone().arrayBuffer(), { status: response.status, statusText: response.statusText, headers }));
+}
+
+function cacheRequest(request) {
+  return new Request(request.url, { method: "GET" });
+}
+
+async function clearCommonApiCache(request) {
+  const origin = new URL(request.url).origin;
+  await Promise.all([
+    caches.default.delete(new Request(`${origin}/api/v1/stats`, { method: "GET" })),
+    caches.default.delete(new Request(`${origin}/api/v1/proxies?healthy_only=true&limit=20&offset=0`, { method: "GET" })),
+  ]);
 }
 
 async function ensureSchema(env) {
