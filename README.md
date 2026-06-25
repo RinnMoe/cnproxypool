@@ -9,8 +9,6 @@ Created by vibe coding
 - D1 持久化，适合 Cloudflare Pages Functions 部署
 - 按 `host:port` 去重
 - 记录健康状态、检测延迟和上次测试时间
-- 页面包含总览、API 访问示例和可用代理明细
-- GitHub：`https://github.com/RinnMoe/cnproxypool`
 
 
 项目结构：
