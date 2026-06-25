@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rinn's ProxyHub</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div class="brand-line">
+          <span>Rinn's ProxyHub</span>
+        </div>
+        <h1>国内代理池</h1>
+        <p>收集自互联网公开信息</p>
+      </header>
+
+      <section id="error-box" class="error hidden"></section>
+
+      <section class="overview-section" aria-labelledby="overview-title">
+        <div class="section-heading">
+          <h2 id="overview-title">总览</h2>
+          <p>代理健康状态</p>
+        </div>
+        <div class="metric-grid">
+          <article><span>总数</span><strong id="stat-total">0</strong></article>
+          <article><span>健康</span><strong id="stat-healthy">0</strong></article>
+          <article><span>失败</span><strong id="stat-failed">0</strong></article>
+          <article><span>未检测</span><strong id="stat-unchecked">0</strong></article>
+        </div>
+      </section>
+
+      <section class="api-section" aria-labelledby="api-title">
+        <div class="section-heading">
+          <h2 id="api-title">通过API访问</h2>
+        </div>
+        <div class="api-grid">
+          <article>
+            <h3>健康检查</h3>
+            <code data-api-path="/api/v1/health">GET /api/v1/health</code>
+          </article>
+          <article>
+            <h3>查询代理列表</h3>
+            <code data-api-path="/api/v1/proxies?healthy_only=true&amp;province=广东省&amp;scheme=http&amp;limit=50">GET /api/v1/proxies?healthy_only=true&amp;province=广东省&amp;scheme=http&amp;limit=50</code>
+          </article>
+          <article>
+            <h3>选择一个代理</h3>
+            <code data-api-path="/api/v1/proxies/select?province=广东省&amp;strategy=fastest&amp;healthy_only=true">GET /api/v1/proxies/select?province=广东省&amp;strategy=fastest&amp;healthy_only=true</code>
+          </article>
+        </div>
+        <pre><code id="api-code-sample">const res = await fetch(`${PROXY_POOL_BASE_URL}/api/v1/proxies/select?province=广东省&amp;strategy=fastest&amp;healthy_only=true`);
+const { item } = await res.json();
+// item.url 可用于 requests / aiohttp / Node 代理配置</code></pre>
+      </section>
+
+      <section class="detail-section" aria-labelledby="proxy-title">
+        <div class="section-heading">
+          <h2 id="proxy-title">代理明细</h2>
+        </div>
+        <div id="proxy-table" class="table proxy-table"></div>
+        <nav class="pagination" aria-label="代理明细分页">
+          <button id="prev-page" type="button">上一页</button>
+          <span id="page-info">第 1 / 1 页</span>
+          <button id="next-page" type="button">下一页</button>
+        </nav>
+      </section>
+
+      <footer class="site-footer">
+        <span id="busuanzi_container_site_pv">本站总访问量 <span id="busuanzi_value_site_pv"></span> 次</span>
+        <a href="https://github.com/RinnMoe/cnproxypool" target="_blank" rel="noreferrer">GitHub</a>
+      </footer>
+    </main>
+    <script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

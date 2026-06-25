@@ -1,0 +1,11 @@
+__pycache__/
+.pytest_cache/
+.venv/
+data/
+node_modules/
+.wrangler/
+.wrangler-pages-dev.*.log
+legacy-docker/
+.upload-cnproxyhub/
+*.sqlite3
+*.pyc

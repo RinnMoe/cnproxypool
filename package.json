@@ -1,0 +1,15 @@
+{
+  "name": "cnproxypool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler pages dev public --local --d1 DB=proxy_pool_hub --port 18080",
+    "deploy": "wrangler pages deploy public --project-name cnproxypool",
+    "d1:init": "wrangler d1 execute proxy_pool_hub --local --file=./schema.sql",
+    "d1:init:remote": "wrangler d1 execute proxy_pool_hub --remote --file=./schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
