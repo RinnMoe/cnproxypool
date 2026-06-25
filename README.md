@@ -1,6 +1,7 @@
-# Rinn's ProxyHub
+# CNproxypool
 
-Rinn's ProxyHub 是面向国内代理的代理池服务。项目基于 Cloudflare Pages Functions 和 D1，负责采集公开代理、去重、检测可用性，并通过页面与 HTTP API 输出结果。
+通过采集互联网公开代理、去重、检测可用性，并通过页面与 HTTP API 输出结果的项目。
+Created by vibe coding
 
 ## 功能
 
@@ -11,9 +12,6 @@ Rinn's ProxyHub 是面向国内代理的代理池服务。项目基于 Cloudflar
 - 页面包含总览、API 访问示例和可用代理明细
 - GitHub：`https://github.com/RinnMoe/cnproxypool`
 
-## Cloudflare Pages 部署
-
-当前部署目标是 Cloudflare Pages。
 
 项目结构：
 
