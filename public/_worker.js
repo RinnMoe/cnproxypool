@@ -8,6 +8,9 @@ const HEALTH_CHECK_HOST = "api.ipify.org";
 const HEALTH_CHECK_PATH = "/";
 const HEALTH_CONNECT_HEADER_LIMIT = 8192;
 const MAX_HEALTH_CHECKS = 500;
+const MAX_SOURCE_PROXY_ATTEMPTS = 3;
+const SOURCE_PROXY_BODY_LIMIT = 1024 * 1024;
+const SOURCE_FALLBACK_STATUSES = new Set([403, 429, 520, 521, 522, 523, 524, 525, 526]);
 const MAX_REFRESH_SOURCES_PER_TICK = 2;
 const SOURCE_CUSTOM_PREFIX = "custom_url:";
 const API_CACHE_SECONDS = 60;
@@ -219,7 +222,7 @@ async function refreshSource(env, source) {
     const errors = [];
     for (const url of sourceUrls(source)) {
       try {
-        const response = await fetchWithTimeout(url, Number(source.timeout_seconds || 8) * 1000);
+        const response = await fetchSourceWithFallback(env, url, Number(source.timeout_seconds || 8) * 1000);
         if (!response.ok) throw new Error(`${response.status} ${response.statusText} for ${url}`);
         const text = await responseText(response, source.key);
         records.push(...parseSource(source.key, text));
@@ -334,6 +337,203 @@ async function checkHttpProxy(row) {
     try { socket?.close(); } catch {}
     return /timed/i.test(error.message || "") ? "timeout" : "failed";
   }
+}
+
+async function fetchSourceWithFallback(env, url, timeoutMs) {
+  try {
+    const response = await fetchWithTimeout(url, timeoutMs);
+    if (!SOURCE_FALLBACK_STATUSES.has(response.status)) return response;
+    return await fetchSourceViaProxyFallback(env, url, timeoutMs, `${response.status} ${response.statusText}`);
+  } catch (error) {
+    return await fetchSourceViaProxyFallback(env, url, timeoutMs, error.message || String(error));
+  }
+}
+
+async function fetchSourceViaProxyFallback(env, url, timeoutMs, directError) {
+  const proxies = await sourceFetchProxies(env, MAX_SOURCE_PROXY_ATTEMPTS);
+  const errors = [`direct_failed: ${directError}`];
+  for (const proxy of proxies) {
+    try {
+      const response = await fetchViaHttpProxy(url, proxy, timeoutMs);
+      if (response.ok) return response;
+      throw new Error(`${response.status} ${response.statusText || "proxy response"}`);
+    } catch (error) {
+      errors.push(`${proxy.host}:${proxy.port}: ${error.message || String(error)}`);
+    }
+  }
+  throw new Error(errors.join("; ").slice(0, 500));
+}
+
+async function sourceFetchProxies(env, limit) {
+  const rows = await env.DB.prepare(`
+    SELECT host, port
+    FROM proxies
+    WHERE health_status = 'ok' AND scheme = 'http'
+    ORDER BY check_latency_seconds IS NULL, check_latency_seconds ASC, last_checked_at DESC
+    LIMIT ?
+  `).bind(Math.max(1, Math.min(Number(limit || MAX_SOURCE_PROXY_ATTEMPTS), 10))).all();
+  return rows.results;
+}
+
+async function fetchViaHttpProxy(url, proxy, timeoutMs) {
+  const target = new URL(url);
+  if (target.protocol === "http:") return await fetchHttpUrlViaProxy(target, proxy, timeoutMs);
+  if (target.protocol === "https:") return await fetchHttpsUrlViaProxy(target, proxy, timeoutMs);
+  throw new Error(`unsupported protocol ${target.protocol}`);
+}
+
+async function fetchHttpUrlViaProxy(target, proxy, timeoutMs) {
+  let socket;
+  try {
+    socket = connect({ hostname: proxy.host, port: Number(proxy.port) });
+    const writer = socket.writable.getWriter();
+    const reader = socket.readable.getReader();
+    const request = `GET ${target.href} HTTP/1.1\r\nHost: ${target.host}\r\nUser-Agent: Mozilla/5.0 RinnProxyHub/0.1\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n`;
+    await withTimeout(writer.write(new TextEncoder().encode(request)), timeoutMs);
+    const response = await readFullHttpResponse(reader, timeoutMs);
+    try { writer.releaseLock(); reader.releaseLock(); socket.close(); } catch {}
+    return response;
+  } catch (error) {
+    try { socket?.close(); } catch {}
+    throw error;
+  }
+}
+
+async function fetchHttpsUrlViaProxy(target, proxy, timeoutMs) {
+  let socket;
+  let secureSocket;
+  try {
+    socket = connect({ hostname: proxy.host, port: Number(proxy.port) }, { secureTransport: "starttls" });
+    const writer = socket.writable.getWriter();
+    const reader = socket.readable.getReader();
+    const port = target.port || "443";
+    const connectRequest = `CONNECT ${target.hostname}:${port} HTTP/1.1\r\nHost: ${target.hostname}:${port}\r\nUser-Agent: Mozilla/5.0 RinnProxyHub/0.1\r\nProxy-Connection: keep-alive\r\n\r\n`;
+    await withTimeout(writer.write(new TextEncoder().encode(connectRequest)), timeoutMs);
+    const connectResponse = await readHttpHeader(reader, timeoutMs);
+    try { writer.releaseLock(); reader.releaseLock(); } catch {}
+    if (!/^HTTP\/1\.[01] 2\d\d/i.test(connectResponse)) throw new Error(`proxy connect failed: ${firstHttpLine(connectResponse)}`);
+
+    secureSocket = socket.startTls();
+    const secureWriter = secureSocket.writable.getWriter();
+    const secureReader = secureSocket.readable.getReader();
+    const path = `${target.pathname || "/"}${target.search}`;
+    const request = `GET ${path} HTTP/1.1\r\nHost: ${target.host}\r\nUser-Agent: Mozilla/5.0 RinnProxyHub/0.1\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n`;
+    await withTimeout(secureWriter.write(new TextEncoder().encode(request)), timeoutMs);
+    const response = await readFullHttpResponse(secureReader, timeoutMs);
+    try { secureWriter.releaseLock(); secureReader.releaseLock(); secureSocket.close(); } catch {}
+    return response;
+  } catch (error) {
+    try { secureSocket?.close(); } catch {}
+    try { socket?.close(); } catch {}
+    throw error;
+  }
+}
+
+async function readFullHttpResponse(reader, timeoutMs) {
+  const chunks = [];
+  let total = 0;
+  while (total < SOURCE_PROXY_BODY_LIMIT) {
+    const result = await withTimeout(reader.read(), timeoutMs);
+    if (!result.value) break;
+    chunks.push(result.value);
+    total += result.value.byteLength;
+    const raw = concatUint8Arrays(chunks);
+    if (isCompleteHttpResponse(raw)) return responseFromRawHttp(raw);
+  }
+  if (total >= SOURCE_PROXY_BODY_LIMIT) throw new Error("proxy response too large");
+  return responseFromRawHttp(concatUint8Arrays(chunks));
+}
+
+function responseFromRawHttp(raw) {
+  const headerEnd = indexOfHeaderEnd(raw);
+  if (headerEnd < 0) throw new Error("proxy response missing headers");
+  const headerText = new TextDecoder("iso-8859-1").decode(raw.slice(0, headerEnd));
+  const lines = headerText.split("\r\n");
+  const statusMatch = (lines.shift() || "").match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})\s*(.*)$/i);
+  if (!statusMatch) throw new Error("proxy response has invalid status");
+  const headers = new Headers();
+  for (const line of lines) {
+    const index = line.indexOf(":");
+    if (index > 0) headers.append(line.slice(0, index).trim(), line.slice(index + 1).trim());
+  }
+  let body = raw.slice(headerEnd + 4);
+  if (/chunked/i.test(headers.get("transfer-encoding") || "")) {
+    body = decodeChunkedBody(body);
+    headers.delete("transfer-encoding");
+  }
+  return new Response(body, { status: Number(statusMatch[1]), statusText: statusMatch[2] || "", headers });
+}
+
+function decodeChunkedBody(body) {
+  const chunks = [];
+  let offset = 0;
+  while (offset < body.byteLength) {
+    const lineEnd = indexOfCrlf(body, offset);
+    if (lineEnd < 0) throw new Error("invalid chunked response");
+    const sizeText = new TextDecoder("ascii").decode(body.slice(offset, lineEnd)).split(";")[0].trim();
+    const size = parseInt(sizeText, 16);
+    if (!Number.isFinite(size)) throw new Error("invalid chunk size");
+    offset = lineEnd + 2;
+    if (size === 0) break;
+    chunks.push(body.slice(offset, offset + size));
+    offset += size + 2;
+  }
+  return concatUint8Arrays(chunks);
+}
+
+function isCompleteHttpResponse(raw) {
+  const headerEnd = indexOfHeaderEnd(raw);
+  if (headerEnd < 0) return false;
+  const headerText = new TextDecoder("iso-8859-1").decode(raw.slice(0, headerEnd));
+  const bodyLength = raw.byteLength - headerEnd - 4;
+  const contentLength = headerText.match(/\r\ncontent-length:\s*(\d+)/i);
+  if (contentLength) return bodyLength >= Number(contentLength[1]);
+  if (/\r\ntransfer-encoding:\s*chunked/i.test(headerText)) return hasCompleteChunkedBody(raw.slice(headerEnd + 4));
+  return false;
+}
+
+function hasCompleteChunkedBody(body) {
+  let offset = 0;
+  while (offset < body.byteLength) {
+    const lineEnd = indexOfCrlf(body, offset);
+    if (lineEnd < 0) return false;
+    const sizeText = new TextDecoder("ascii").decode(body.slice(offset, lineEnd)).split(";")[0].trim();
+    const size = parseInt(sizeText, 16);
+    if (!Number.isFinite(size)) return false;
+    offset = lineEnd + 2;
+    if (size === 0) return body.byteLength >= offset + 2;
+    offset += size + 2;
+  }
+  return false;
+}
+
+function concatUint8Arrays(chunks) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+function indexOfHeaderEnd(bytes) {
+  for (let index = 0; index <= bytes.byteLength - 4; index += 1) {
+    if (bytes[index] === 13 && bytes[index + 1] === 10 && bytes[index + 2] === 13 && bytes[index + 3] === 10) return index;
+  }
+  return -1;
+}
+
+function indexOfCrlf(bytes, start) {
+  for (let index = start; index <= bytes.byteLength - 2; index += 1) {
+    if (bytes[index] === 13 && bytes[index + 1] === 10) return index;
+  }
+  return -1;
+}
+
+function firstHttpLine(value) {
+  return String(value || "").split(/\r?\n/, 1)[0] || "empty response";
 }
 
 async function readHttpHeader(reader, timeoutMs = HEALTH_TIMEOUT_MS) {
