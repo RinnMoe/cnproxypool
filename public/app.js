@@ -58,8 +58,8 @@ function loadProxyPage(page) {
 function render() {
   $("#stat-total").textContent = state.stats.total || 0;
   $("#stat-healthy").textContent = state.stats.healthy || 0;
-  $("#stat-failed").textContent = state.stats.failed || 0;
-  $("#stat-unchecked").textContent = state.stats.unchecked || 0;
+  $("#stat-checking").textContent = state.stats.unchecked || 0;
+  $("#stat-next-check").textContent = formatCountdown(state.stats.next_check_in_seconds);
   renderProxies(state.proxies);
   renderPagination();
 }
@@ -146,6 +146,15 @@ function formatTime(timestamp) {
   const date = new Date(value * 1000);
   const pad = (item) => String(item).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function formatCountdown(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value)) return "-";
+  const remaining = Math.max(0, Math.ceil(value));
+  if (remaining <= 0) return "即将检测";
+  if (remaining < 60) return `${remaining}秒后`;
+  return `${Math.ceil(remaining / 60)}分后`;
 }
 
 function escapeHtml(value) {

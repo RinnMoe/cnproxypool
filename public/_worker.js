@@ -10,7 +10,7 @@ const MAX_HEALTH_CHECKS = 500;
 const MAX_REFRESH_SOURCES_PER_TICK = 2;
 const SOURCE_CUSTOM_PREFIX = "custom_url:";
 const API_CACHE_SECONDS = 60;
-const CACHEABLE_GET_PATHS = new Set(["/api/v1/stats", "/api/v1/proxies", "/api/v1/proxies/select"]);
+const CACHEABLE_GET_PATHS = new Set(["/api/v1/proxies", "/api/v1/proxies/select"]);
 
 const BUILTIN_SOURCES = [
   { key: "ip3366_free", name: "IP3366 Free", type: "builtin", url: "http://www.ip3366.net/free/?stype=1", refresh_interval_seconds: 1800, timeout_seconds: 8 },
@@ -374,7 +374,10 @@ async function selectProxy(env, params) {
 }
 
 async function stats(env) {
-  const rows = await env.DB.prepare("SELECT health_status, province, sources_json FROM proxies").all();
+  const [rows, maintenance] = await Promise.all([
+    env.DB.prepare("SELECT health_status, province, sources_json FROM proxies").all(),
+    maintenanceSchedule(env),
+  ]);
   const by_source = {};
   const by_province = {};
   for (const row of rows.results) {
@@ -388,8 +391,21 @@ async function stats(env) {
     healthy: statuses.filter((item) => item === "ok").length,
     failed: statuses.filter((item) => !["ok", "unchecked", ""].includes(item)).length,
     unchecked: statuses.filter((item) => item === "unchecked").length,
+    next_check_at: maintenance.next_check_at,
+    next_check_in_seconds: maintenance.next_check_in_seconds,
     by_source,
     by_province,
+  };
+}
+
+async function maintenanceSchedule(env) {
+  const now = epoch();
+  const interval = Math.max(60, Number(await setting(env, "maintenance_interval_seconds", "600")));
+  const last = Number(await setting(env, "last_maintenance_at", "0"));
+  const next = last > 0 ? last + interval : now;
+  return {
+    next_check_at: next,
+    next_check_in_seconds: Math.max(0, next - now),
   };
 }
 
