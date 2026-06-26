@@ -3,6 +3,9 @@ import { connect } from "cloudflare:sockets";
 const VERSION = "0.1.0";
 const DEFAULT_TIMEOUT_MS = 8000;
 const HEALTH_TIMEOUT_MS = 6000;
+const HEALTH_CHECK_HOST = "api.ipify.org";
+const HEALTH_CHECK_PATH = "/";
+const HEALTH_CONNECT_HEADER_LIMIT = 8192;
 const MAX_HEALTH_CHECKS = 500;
 const MAX_REFRESH_SOURCES_PER_TICK = 2;
 const SOURCE_CUSTOM_PREFIX = "custom_url:";
@@ -253,7 +256,7 @@ async function checkHealth(env, maxChecks = MAX_HEALTH_CHECKS) {
   let checked = 0;
   for (const row of rows.results) {
     const started = Date.now();
-    const status = await checkProxy(row);
+    const status = await checkProxyWithTimeout(row);
     const latency = (Date.now() - started) / 1000;
     const ok = status === "ok";
     await env.DB.prepare(`
@@ -267,21 +270,56 @@ async function checkHealth(env, maxChecks = MAX_HEALTH_CHECKS) {
   return { checked, ...(await stats(env)) };
 }
 
-async function checkProxy(row) {
+async function checkProxyWithTimeout(row) {
   try {
-    const socket = connect({ hostname: row.host, port: Number(row.port) });
-    const writer = socket.writable.getWriter();
-    const reader = socket.readable.getReader();
-    const request = `GET http://www.cloudflare.com/cdn-cgi/trace HTTP/1.1\r\nHost: www.cloudflare.com\r\nUser-Agent: RinnProxyHub/0.1\r\nConnection: close\r\n\r\n`;
-    await withTimeout(writer.write(new TextEncoder().encode(request)), HEALTH_TIMEOUT_MS);
-    const result = await withTimeout(reader.read(), HEALTH_TIMEOUT_MS);
-    try { writer.releaseLock(); reader.releaseLock(); socket.close(); } catch {}
-    if (!result.value) return "failed";
-    const text = new TextDecoder().decode(result.value);
-    return /^HTTP\/1\.[01] [23]\d\d/.test(text) ? "ok" : "http_error";
+    return await withTimeout(checkProxy(row), HEALTH_TIMEOUT_MS);
   } catch (error) {
+    if (/(cert|certificate|tls|ssl|trust|x509)/i.test(error.message || "")) return "tls_error";
     return /timed/i.test(error.message || "") ? "timeout" : "failed";
   }
+}
+
+async function checkProxy(row) {
+  let socket;
+  let secureSocket;
+  try {
+    socket = connect({ hostname: row.host, port: Number(row.port) }, { secureTransport: "starttls" });
+    const writer = socket.writable.getWriter();
+    const reader = socket.readable.getReader();
+    const connectRequest = `CONNECT ${HEALTH_CHECK_HOST}:443 HTTP/1.1\r\nHost: ${HEALTH_CHECK_HOST}:443\r\nUser-Agent: RinnProxyHub/0.1\r\nProxy-Connection: close\r\n\r\n`;
+    await withTimeout(writer.write(new TextEncoder().encode(connectRequest)), HEALTH_TIMEOUT_MS);
+    const connectResponse = await readHttpHeader(reader);
+    try { writer.releaseLock(); reader.releaseLock(); } catch {}
+    if (!/^HTTP\/1\.[01] 2\d\d/i.test(connectResponse)) {
+      try { socket.close(); } catch {}
+      return "connect_error";
+    }
+
+    secureSocket = socket.startTls();
+    const secureWriter = secureSocket.writable.getWriter();
+    const secureReader = secureSocket.readable.getReader();
+    const request = `GET ${HEALTH_CHECK_PATH} HTTP/1.1\r\nHost: ${HEALTH_CHECK_HOST}\r\nUser-Agent: RinnProxyHub/0.1\r\nConnection: close\r\n\r\n`;
+    await withTimeout(secureWriter.write(new TextEncoder().encode(request)), HEALTH_TIMEOUT_MS);
+    const response = await readHttpHeader(secureReader);
+    try { secureWriter.releaseLock(); secureReader.releaseLock(); secureSocket.close(); } catch {}
+    return /^HTTP\/1\.[01] [23]\d\d/i.test(response) ? "ok" : "http_error";
+  } catch (error) {
+    try { secureSocket?.close(); } catch {}
+    try { socket?.close(); } catch {}
+    if (/(cert|certificate|tls|ssl|trust|x509)/i.test(error.message || "")) return "tls_error";
+    return /timed/i.test(error.message || "") ? "timeout" : "failed";
+  }
+}
+
+async function readHttpHeader(reader) {
+  const decoder = new TextDecoder();
+  let text = "";
+  while (!text.includes("\r\n\r\n") && text.length < HEALTH_CONNECT_HEADER_LIMIT) {
+    const result = await withTimeout(reader.read(), HEALTH_TIMEOUT_MS);
+    if (!result.value) break;
+    text += decoder.decode(result.value, { stream: true });
+  }
+  return text;
 }
 
 async function listSources(env) {
