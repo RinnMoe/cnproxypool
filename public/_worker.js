@@ -3,6 +3,7 @@ import { connect } from "cloudflare:sockets";
 const VERSION = "0.1.0";
 const DEFAULT_TIMEOUT_MS = 8000;
 const HEALTH_TIMEOUT_MS = 6000;
+const HEALTH_ATTEMPT_TIMEOUT_MS = 3000;
 const HEALTH_CHECK_HOST = "api.ipify.org";
 const HEALTH_CHECK_PATH = "/";
 const HEALTH_CONNECT_HEADER_LIMIT = 8192;
@@ -16,7 +17,7 @@ const BUILTIN_SOURCES = [
   { key: "ip3366_free", name: "IP3366 Free", type: "builtin", url: "http://www.ip3366.net/free/?stype=1", refresh_interval_seconds: 1800, timeout_seconds: 8 },
   { key: "qiyun_free", name: "Qiyun Free", type: "builtin", url: "https://www.qiyunip.com/freeProxy/", refresh_interval_seconds: 1800, timeout_seconds: 8 },
   { key: "66daili_free", name: "66daili Free", type: "builtin", url: "https://www.66daili.com/", refresh_interval_seconds: 1800, timeout_seconds: 8 },
-  { key: "89ip_free", name: "89IP Free", type: "builtin", url: "https://www.89ip.cn/", refresh_interval_seconds: 1800, timeout_seconds: 8 },
+  { key: "89ip_free", name: "89IP Free", type: "builtin", url: "https://api.89ip.cn/tqdl.html?api=1&num=500&port=&address=&isp=", refresh_interval_seconds: 1800, timeout_seconds: 8 },
   { key: "zdaye_free", name: "Zdaye Free", type: "builtin", url: "https://www.zdaye.com/free/", refresh_interval_seconds: 1800, timeout_seconds: 8 },
 ];
 
@@ -280,6 +281,13 @@ async function checkProxyWithTimeout(row) {
 }
 
 async function checkProxy(row) {
+  const httpsStatus = await checkHttpsProxy(row);
+  if (httpsStatus === "ok") return "ok";
+  const httpStatus = await checkHttpProxy(row);
+  return httpStatus === "ok" ? "ok" : httpsStatus;
+}
+
+async function checkHttpsProxy(row) {
   let socket;
   let secureSocket;
   try {
@@ -287,8 +295,8 @@ async function checkProxy(row) {
     const writer = socket.writable.getWriter();
     const reader = socket.readable.getReader();
     const connectRequest = `CONNECT ${HEALTH_CHECK_HOST}:443 HTTP/1.1\r\nHost: ${HEALTH_CHECK_HOST}:443\r\nUser-Agent: RinnProxyHub/0.1\r\nProxy-Connection: close\r\n\r\n`;
-    await withTimeout(writer.write(new TextEncoder().encode(connectRequest)), HEALTH_TIMEOUT_MS);
-    const connectResponse = await readHttpHeader(reader);
+    await withTimeout(writer.write(new TextEncoder().encode(connectRequest)), HEALTH_ATTEMPT_TIMEOUT_MS);
+    const connectResponse = await readHttpHeader(reader, HEALTH_ATTEMPT_TIMEOUT_MS);
     try { writer.releaseLock(); reader.releaseLock(); } catch {}
     if (!/^HTTP\/1\.[01] 2\d\d/i.test(connectResponse)) {
       try { socket.close(); } catch {}
@@ -299,8 +307,8 @@ async function checkProxy(row) {
     const secureWriter = secureSocket.writable.getWriter();
     const secureReader = secureSocket.readable.getReader();
     const request = `GET ${HEALTH_CHECK_PATH} HTTP/1.1\r\nHost: ${HEALTH_CHECK_HOST}\r\nUser-Agent: RinnProxyHub/0.1\r\nConnection: close\r\n\r\n`;
-    await withTimeout(secureWriter.write(new TextEncoder().encode(request)), HEALTH_TIMEOUT_MS);
-    const response = await readHttpHeader(secureReader);
+    await withTimeout(secureWriter.write(new TextEncoder().encode(request)), HEALTH_ATTEMPT_TIMEOUT_MS);
+    const response = await readHttpHeader(secureReader, HEALTH_ATTEMPT_TIMEOUT_MS);
     try { secureWriter.releaseLock(); secureReader.releaseLock(); secureSocket.close(); } catch {}
     return /^HTTP\/1\.[01] [23]\d\d/i.test(response) ? "ok" : "http_error";
   } catch (error) {
@@ -311,11 +319,28 @@ async function checkProxy(row) {
   }
 }
 
-async function readHttpHeader(reader) {
+async function checkHttpProxy(row) {
+  let socket;
+  try {
+    socket = connect({ hostname: row.host, port: Number(row.port) });
+    const writer = socket.writable.getWriter();
+    const reader = socket.readable.getReader();
+    const request = `GET http://${HEALTH_CHECK_HOST}${HEALTH_CHECK_PATH} HTTP/1.1\r\nHost: ${HEALTH_CHECK_HOST}\r\nUser-Agent: RinnProxyHub/0.1\r\nConnection: close\r\n\r\n`;
+    await withTimeout(writer.write(new TextEncoder().encode(request)), HEALTH_ATTEMPT_TIMEOUT_MS);
+    const response = await readHttpHeader(reader, HEALTH_ATTEMPT_TIMEOUT_MS);
+    try { writer.releaseLock(); reader.releaseLock(); socket.close(); } catch {}
+    return /^HTTP\/1\.[01] [23]\d\d/i.test(response) ? "ok" : "http_error";
+  } catch (error) {
+    try { socket?.close(); } catch {}
+    return /timed/i.test(error.message || "") ? "timeout" : "failed";
+  }
+}
+
+async function readHttpHeader(reader, timeoutMs = HEALTH_TIMEOUT_MS) {
   const decoder = new TextDecoder();
   let text = "";
   while (!text.includes("\r\n\r\n") && text.length < HEALTH_CONNECT_HEADER_LIMIT) {
-    const result = await withTimeout(reader.read(), HEALTH_TIMEOUT_MS);
+    const result = await withTimeout(reader.read(), timeoutMs);
     if (!result.value) break;
     text += decoder.decode(result.value, { stream: true });
   }
@@ -464,7 +489,7 @@ function parse89Ip(text, source) {
     const [province, city, carrier] = splitLocationWithCarrier(row[2]);
     records.push(normalizeRecord({ host: row[0], port: Number(row[1]), scheme: "http", source, province, city, carrier, raw_location: row[2] }));
   }
-  return records;
+  return records.length ? records : parseGeneric(text, source);
 }
 
 function parseZdaye(text, source) {
@@ -489,10 +514,13 @@ function parseGeneric(text, source) {
     tableRecords.push(normalizeRecord({ host: row[0], port: Number(row[1]), scheme: normalizeScheme(row[3]), source, province, city, carrier, anonymity: row[2], raw_location: row[4], source_latency_seconds: parseLatency(row[5]) }));
   }
   if (tableRecords.length) return tableRecords;
+  return parseIpPortPairs(text, source);
+}
+
+function parseIpPortPairs(text, source) {
   const records = [];
-  for (const line of text.split(/\r?\n/)) {
-    const match = line.match(/((?:\d{1,3}\.){3}\d{1,3})\s*[:\s]\s*(\d{2,5})/);
-    if (!match || !isIp(match[1]) || !validPort(match[2])) continue;
+  for (const match of String(text || "").matchAll(/((?:\d{1,3}\.){3}\d{1,3})\s*[:\s]\s*(\d{2,5})/g)) {
+    if (!isIp(match[1]) || !validPort(match[2])) continue;
     records.push(normalizeRecord({ host: match[1], port: Number(match[2]), scheme: "http", source }));
   }
   return records;
