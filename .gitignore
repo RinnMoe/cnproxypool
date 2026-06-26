@@ -4,7 +4,7 @@ __pycache__/
 data/
 node_modules/
 .wrangler/
-.wrangler-pages-dev.*.log
+.wrangler-pages-dev*.log
 legacy-docker/
 .upload-cnproxyhub/
 *.sqlite3
