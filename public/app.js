@@ -2,6 +2,10 @@ const state = { stats: {}, proxies: [], proxyTotal: 0, page: 1, pageSize: 20 };
 const nonAdminRegionWords = ["阿里云", "腾讯云", "华为云", "百度云", "京东云", "火山云", "移动", "联通", "电信", "铁通", "广电", "教育网"];
 
 const $ = (selector) => document.querySelector(selector);
+const setText = (selector, value) => {
+  const node = $(selector);
+  if (node) node.textContent = value;
+};
 
 function renderApiExamples() {
   const origin = window.location.origin;
@@ -56,10 +60,10 @@ function loadProxyPage(page) {
 }
 
 function render() {
-  $("#stat-total").textContent = state.stats.total || 0;
-  $("#stat-healthy").textContent = state.stats.healthy || 0;
-  $("#stat-checking").textContent = state.stats.unchecked || 0;
-  $("#stat-next-check").textContent = formatCountdown(state.stats.next_check_in_seconds);
+  setText("#stat-total", state.stats.total || 0);
+  setText("#stat-healthy", state.stats.healthy || 0);
+  setText("#stat-checking", state.stats.unchecked || 0);
+  setText("#stat-next-check", formatCountdown(state.stats.next_check_in_seconds));
   renderProxies(state.proxies);
   renderPagination();
 }
