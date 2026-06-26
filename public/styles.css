@@ -179,11 +179,12 @@ button:disabled {
 .proxy-table th:nth-child(2) { width: 70px; }
 .proxy-table th:nth-child(3) { width: 70px; }
 .proxy-table th:nth-child(4) { width: 170px; }
-.proxy-table th:nth-child(5) { width: 82px; }
-.proxy-table th:nth-child(6) { width: 92px; }
-.proxy-table th:nth-child(7) { width: 150px; }
+.proxy-table th:nth-child(5) { width: 76px; }
+.proxy-table th:nth-child(6) { width: 82px; }
+.proxy-table th:nth-child(7) { width: 92px; }
+.proxy-table th:nth-child(8) { width: 150px; }
 .proxy-table td:nth-child(1) code,
-.proxy-table td:nth-child(7) {
+.proxy-table td:nth-child(8) {
   white-space: nowrap;
 }
 .proxy-table td:nth-child(4) {

@@ -62,7 +62,7 @@ function loadProxyPage(page) {
 function render() {
   setText("#stat-total", state.stats.total || 0);
   setText("#stat-healthy", state.stats.healthy || 0);
-  setText("#stat-checking", state.stats.unchecked || 0);
+  setText("#stat-pending", state.stats.unchecked || 0);
   setText("#stat-next-check", formatCountdown(state.stats.next_check_in_seconds));
   renderProxies(state.proxies);
   renderPagination();
@@ -71,7 +71,7 @@ function render() {
 function renderProxies(items) {
   $("#proxy-table").innerHTML = `
     <table>
-      <thead><tr><th>IP</th><th>端口</th><th>匿名性</th><th>地区</th><th>状态</th><th>延迟</th><th>上次测试时间</th></tr></thead>
+      <thead><tr><th>IP</th><th>端口</th><th>匿名性</th><th>地区</th><th>协议</th><th>状态</th><th>延迟</th><th>上次测试时间</th></tr></thead>
       <tbody>
         ${items.map((item) => `
           <tr>
@@ -79,11 +79,12 @@ function renderProxies(items) {
             <td>${escapeHtml(item.port)}</td>
             <td>${escapeHtml(normalizeAnonymity(item.anonymity))}</td>
             <td>${escapeHtml(formatLocation(item))}</td>
+            <td>${escapeHtml(formatScheme(item.scheme))}</td>
             <td><span class="status ${item.health_status === "ok" ? "ok" : item.health_status === "unchecked" ? "" : "error"}">${escapeHtml(formatHealthStatus(item.health_status))}</span></td>
             <td>${formatLatency(item.check_latency_seconds)}</td>
             <td>${formatTime(item.last_checked_at)}</td>
           </tr>
-        `).join("") || `<tr><td colspan="7">暂无代理</td></tr>`}
+        `).join("") || `<tr><td colspan="8">暂无代理</td></tr>`}
       </tbody>
     </table>`;
 }
@@ -127,6 +128,14 @@ function normalizeAnonymity(value) {
   if (text.includes("透明")) return "透明";
   if (text.includes("普匿")) return "普匿";
   return text;
+}
+
+function formatScheme(value) {
+  const text = String(value || "").toLowerCase();
+  if (text === "socks5") return "Socks5";
+  if (text === "https") return "HTTPS";
+  if (text === "http") return "HTTP";
+  return text || "-";
 }
 
 function formatHealthStatus(value) {
