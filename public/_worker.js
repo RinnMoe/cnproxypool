@@ -700,7 +700,7 @@ async function listProxies(env, params) {
   const total = await env.DB.prepare(`SELECT COUNT(*) AS total FROM proxies ${sqlWhere}`).bind(...values).first();
   const rows = await env.DB.prepare(`
     SELECT * FROM proxies ${sqlWhere}
-    ORDER BY check_latency_seconds IS NULL, check_latency_seconds ASC, last_checked_at DESC
+    ORDER BY last_checked_at IS NULL, last_checked_at DESC, check_latency_seconds IS NULL, check_latency_seconds ASC
     LIMIT ? OFFSET ?
   `).bind(...values, limit, offset).all();
   return { items: rows.results.map(publicProxy), total: Number(total.total || 0) };
