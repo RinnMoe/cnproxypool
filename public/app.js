@@ -80,7 +80,7 @@ function renderProxies(items) {
             <td>${escapeHtml(normalizeAnonymity(item.anonymity))}</td>
             <td>${escapeHtml(formatLocation(item))}</td>
             <td>${escapeHtml(formatScheme(item.scheme))}</td>
-            <td><span class="status ${item.health_status === "ok" ? "ok" : item.health_status === "unchecked" ? "" : "error"}">${escapeHtml(formatHealthStatus(item.health_status))}</span></td>
+            <td><span class="status ${displayHealthStatus(item) === "ok" ? "ok" : displayHealthStatus(item) === "unchecked" ? "" : "error"}">${escapeHtml(formatHealthStatus(displayHealthStatus(item)))}</span></td>
             <td>${formatLatency(item.check_latency_seconds)}</td>
             <td>${formatTime(item.last_checked_at)}</td>
           </tr>
@@ -146,6 +146,10 @@ function formatHealthStatus(value) {
     http_error: "HTTP 错误",
     unchecked: "未测",
   }[value] || value || "未测";
+}
+
+function displayHealthStatus(item) {
+  return item.effective_health_status || item.health_status;
 }
 
 function formatLatency(seconds) {

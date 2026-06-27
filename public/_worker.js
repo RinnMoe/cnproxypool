@@ -952,6 +952,7 @@ function dedupe(records) {
 function publicProxy(row) {
   const [province, city] = normalizeRegionFields(cleanRegion(row.province), cleanRegion(row.city));
   const anonymity = cleanText(row.anonymity);
+  const effectiveHealthStatus = isEffectivelyHealthy(row) ? "ok" : row.health_status;
   return {
     host: row.host,
     port: Number(row.port),
@@ -968,6 +969,7 @@ function publicProxy(row) {
     source_latency_seconds: row.source_latency_seconds,
     check_latency_seconds: row.check_latency_seconds,
     health_status: row.health_status,
+    effective_health_status: effectiveHealthStatus,
     last_seen_at: row.last_seen_at,
     last_checked_at: row.last_checked_at,
     fail_count: Number(row.fail_count || 0),
