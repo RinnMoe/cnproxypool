@@ -7,6 +7,11 @@ const HEALTH_ATTEMPT_TIMEOUT_MS = 3000;
 const HEALTH_CHECK_CONCURRENCY = 25;
 const HEALTH_CHECK_HOST = "api.ipify.org";
 const HEALTH_CHECK_PATH = "/";
+const HEALTH_CHECK_TARGETS = [
+  { host: "api.ipify.org", path: "/" },
+  { host: "icanhazip.com", path: "/" },
+  { host: "ifconfig.me", path: "/ip" },
+];
 const HEALTH_CONNECT_HEADER_LIMIT = 8192;
 const MAX_HEALTH_CHECKS = 500;
 const MAX_SOURCE_PROXY_ATTEMPTS = 3;
@@ -302,13 +307,23 @@ function preferHealthStatus(...statuses) {
 }
 
 async function checkHttpsProxy(row) {
+  let lastStatus = "failed";
+  for (const target of HEALTH_CHECK_TARGETS) {
+    const status = await checkHttpsProxyTarget(row, target);
+    if (status === "ok") return "ok";
+    lastStatus = preferHealthStatus(lastStatus, status);
+  }
+  return lastStatus;
+}
+
+async function checkHttpsProxyTarget(row, target) {
   let socket;
   let secureSocket;
   try {
     socket = connect({ hostname: row.host, port: Number(row.port) }, { secureTransport: "starttls" });
     const writer = socket.writable.getWriter();
     const reader = socket.readable.getReader();
-    const connectRequest = `CONNECT ${HEALTH_CHECK_HOST}:443 HTTP/1.1\r\nHost: ${HEALTH_CHECK_HOST}:443\r\nUser-Agent: RinnProxyHub/0.1\r\nProxy-Connection: close\r\n\r\n`;
+    const connectRequest = `CONNECT ${target.host}:443 HTTP/1.1\r\nHost: ${target.host}:443\r\nUser-Agent: RinnProxyHub/0.1\r\nProxy-Connection: close\r\n\r\n`;
     await withTimeout(writer.write(new TextEncoder().encode(connectRequest)), HEALTH_ATTEMPT_TIMEOUT_MS);
     const connectResponse = await readHttpHeader(reader, HEALTH_ATTEMPT_TIMEOUT_MS);
     try { writer.releaseLock(); reader.releaseLock(); } catch {}
@@ -320,7 +335,7 @@ async function checkHttpsProxy(row) {
     secureSocket = socket.startTls();
     const secureWriter = secureSocket.writable.getWriter();
     const secureReader = secureSocket.readable.getReader();
-    const request = `GET ${HEALTH_CHECK_PATH} HTTP/1.1\r\nHost: ${HEALTH_CHECK_HOST}\r\nUser-Agent: RinnProxyHub/0.1\r\nConnection: close\r\n\r\n`;
+    const request = `GET ${target.path} HTTP/1.1\r\nHost: ${target.host}\r\nUser-Agent: RinnProxyHub/0.1\r\nConnection: close\r\n\r\n`;
     await withTimeout(secureWriter.write(new TextEncoder().encode(request)), HEALTH_ATTEMPT_TIMEOUT_MS);
     const response = await readHttpHeader(secureReader, HEALTH_ATTEMPT_TIMEOUT_MS);
     try { secureWriter.releaseLock(); secureReader.releaseLock(); secureSocket.close(); } catch {}
@@ -334,12 +349,22 @@ async function checkHttpsProxy(row) {
 }
 
 async function checkHttpProxy(row) {
+  let lastStatus = "failed";
+  for (const target of HEALTH_CHECK_TARGETS) {
+    const status = await checkHttpProxyTarget(row, target);
+    if (status === "ok") return "ok";
+    lastStatus = preferHealthStatus(lastStatus, status);
+  }
+  return lastStatus;
+}
+
+async function checkHttpProxyTarget(row, target) {
   let socket;
   try {
     socket = connect({ hostname: row.host, port: Number(row.port) });
     const writer = socket.writable.getWriter();
     const reader = socket.readable.getReader();
-    const request = `GET http://${HEALTH_CHECK_HOST}${HEALTH_CHECK_PATH} HTTP/1.1\r\nHost: ${HEALTH_CHECK_HOST}\r\nUser-Agent: RinnProxyHub/0.1\r\nConnection: close\r\n\r\n`;
+    const request = `GET http://${target.host}${target.path} HTTP/1.1\r\nHost: ${target.host}\r\nUser-Agent: RinnProxyHub/0.1\r\nConnection: close\r\n\r\n`;
     await withTimeout(writer.write(new TextEncoder().encode(request)), HEALTH_ATTEMPT_TIMEOUT_MS);
     const response = await readHttpHeader(reader, HEALTH_ATTEMPT_TIMEOUT_MS);
     try { writer.releaseLock(); reader.releaseLock(); socket.close(); } catch {}
@@ -616,21 +641,30 @@ async function stats(env) {
   ]);
   const by_source = {};
   const by_province = {};
+  const status_counts = {};
+  const health_by_source = {};
   for (const row of rows.results) {
-    for (const source of safeJson(row.sources_json, [])) by_source[source] = (by_source[source] || 0) + 1;
+    const status = row.health_status || "unchecked";
+    status_counts[status] = (status_counts[status] || 0) + 1;
+    for (const source of safeJson(row.sources_json, [])) {
+      by_source[source] = (by_source[source] || 0) + 1;
+      health_by_source[source] ||= {};
+      health_by_source[source][status] = (health_by_source[source][status] || 0) + 1;
+    }
     const province = cleanRegion(row.province || "unscoped");
     by_province[province] = (by_province[province] || 0) + 1;
   }
-  const statuses = rows.results.map((row) => row.health_status || "unchecked");
   return {
     total: rows.results.length,
-    healthy: statuses.filter((item) => item === "ok").length,
-    failed: statuses.filter((item) => !["ok", "unchecked", ""].includes(item)).length,
-    unchecked: statuses.filter((item) => item === "unchecked").length,
+    healthy: status_counts.ok || 0,
+    failed: rows.results.length - (status_counts.ok || 0) - (status_counts.unchecked || 0),
+    unchecked: status_counts.unchecked || 0,
     next_check_at: maintenance.next_check_at,
     next_check_in_seconds: maintenance.next_check_in_seconds,
     by_source,
     by_province,
+    status_counts,
+    health_by_source,
   };
 }
 
