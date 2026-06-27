@@ -269,8 +269,9 @@ async function checkHealth(env, maxChecks = MAX_HEALTH_CHECKS, options = {}) {
     values.push(String(options.health_status));
   }
   if (options.source) {
-    where.push("sources_json LIKE ?");
-    values.push(`%"${String(options.source).replace(/[%_]/g, "")}"%`);
+    const source = String(options.source).replace(/[%_]/g, "");
+    where.push("(source = ? OR sources_json LIKE ?)");
+    values.push(source, `%"${source}"%`);
   }
   const sqlWhere = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const rows = await env.DB.prepare(`
