@@ -100,7 +100,7 @@ async function routeRequest(request, env, ctx, pathOverride = "") {
   }
   if (path === "/api/v1/check" && request.method === "POST") {
     const body = await readJson(request);
-    const response = json(await checkHealth(env, Number(body.max_checks || MAX_HEALTH_CHECKS)));
+    const response = json(await checkHealth(env, Number(body.max_checks || MAX_HEALTH_CHECKS), body));
     ctx.waitUntil(clearCommonApiCache(request));
     return response;
   }
@@ -209,7 +209,7 @@ async function refreshAll(env, body = {}) {
     refresh.saved += item.saved || 0;
     refresh[item.error ? "failed" : "ok"].push(item.error ? { key: source.key, error: item.error } : { key: source.key, count: item.count });
   }
-  if (body.check !== false) await checkHealth(env, Number(body.max_checks || MAX_HEALTH_CHECKS));
+  if (body.check !== false) await checkHealth(env, Number(body.max_checks || MAX_HEALTH_CHECKS), body);
   return { ...(await stats(env)), sources: await listSources(env), refresh };
 }
 
@@ -217,7 +217,7 @@ async function refreshOne(env, key, body = {}) {
   const source = await env.DB.prepare("SELECT * FROM sources WHERE key = ?").bind(key).first();
   if (!source) return { detail: "source not found" };
   const item = await refreshSource(env, source);
-  if (body.check !== false) await checkHealth(env, Number(body.max_checks || MAX_HEALTH_CHECKS));
+  if (body.check !== false) await checkHealth(env, Number(body.max_checks || MAX_HEALTH_CHECKS), body);
   return { ...(await stats(env)), sources: await listSources(env), refresh: item };
 }
 
@@ -257,12 +257,24 @@ function sourceUrls(source) {
   return [source.url];
 }
 
-async function checkHealth(env, maxChecks = MAX_HEALTH_CHECKS) {
+async function checkHealth(env, maxChecks = MAX_HEALTH_CHECKS, options = {}) {
+  const where = [];
+  const values = [];
+  if (options.scheme) {
+    where.push("scheme = ?");
+    values.push(normalizeScheme(options.scheme));
+  }
+  if (options.health_status) {
+    where.push("health_status = ?");
+    values.push(String(options.health_status));
+  }
+  const sqlWhere = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const rows = await env.DB.prepare(`
     SELECT * FROM proxies
+    ${sqlWhere}
     ORDER BY last_checked_at IS NULL DESC, COALESCE(last_checked_at, 0) ASC
     LIMIT ?
-  `).bind(Math.max(1, Math.min(maxChecks, 5000))).all();
+  `).bind(...values, Math.max(1, Math.min(maxChecks, 5000))).all();
   let checked = 0;
   for (let index = 0; index < rows.results.length; index += HEALTH_CHECK_CONCURRENCY) {
     const batchRows = rows.results.slice(index, index + HEALTH_CHECK_CONCURRENCY);
@@ -294,6 +306,7 @@ async function checkProxyWithTimeout(row) {
 }
 
 async function checkProxy(row) {
+  if (normalizeScheme(row.scheme) === "socks5") return await checkSocks5Proxy(row);
   const [httpsStatus, httpStatus] = await Promise.all([checkHttpsProxy(row), checkHttpProxy(row)]);
   if (httpsStatus === "ok" || httpStatus === "ok") return "ok";
   return preferHealthStatus(httpsStatus, httpStatus);
@@ -366,6 +379,57 @@ async function checkHttpProxyTarget(row, target) {
     const reader = socket.readable.getReader();
     const request = `GET http://${target.host}${target.path} HTTP/1.1\r\nHost: ${target.host}\r\nUser-Agent: RinnProxyHub/0.1\r\nConnection: close\r\n\r\n`;
     await withTimeout(writer.write(new TextEncoder().encode(request)), HEALTH_ATTEMPT_TIMEOUT_MS);
+    const response = await readHttpHeader(reader, HEALTH_ATTEMPT_TIMEOUT_MS);
+    try { writer.releaseLock(); reader.releaseLock(); socket.close(); } catch {}
+    return /^HTTP\/1\.[01] [23]\d\d/i.test(response) ? "ok" : "http_error";
+  } catch (error) {
+    try { socket?.close(); } catch {}
+    return /timed/i.test(error.message || "") ? "timeout" : "failed";
+  }
+}
+
+async function checkSocks5Proxy(row) {
+  let lastStatus = "failed";
+  for (const target of HEALTH_CHECK_TARGETS) {
+    const status = await checkSocks5ProxyTarget(row, target);
+    if (status === "ok") return "ok";
+    lastStatus = preferHealthStatus(lastStatus, status);
+  }
+  return lastStatus;
+}
+
+async function checkSocks5ProxyTarget(row, target) {
+  let socket;
+  try {
+    socket = connect({ hostname: row.host, port: Number(row.port) });
+    const writer = socket.writable.getWriter();
+    const reader = socket.readable.getReader();
+    await withTimeout(writer.write(new Uint8Array([0x05, 0x01, 0x00])), HEALTH_ATTEMPT_TIMEOUT_MS);
+    const greeting = await readAtLeast(reader, 2, HEALTH_ATTEMPT_TIMEOUT_MS);
+    if (greeting[0] !== 0x05 || greeting[1] !== 0x00) {
+      try { writer.releaseLock(); reader.releaseLock(); socket.close(); } catch {}
+      return "connect_error";
+    }
+
+    const hostBytes = new TextEncoder().encode(target.host);
+    const request = new Uint8Array(7 + hostBytes.length);
+    request[0] = 0x05;
+    request[1] = 0x01;
+    request[2] = 0x00;
+    request[3] = 0x03;
+    request[4] = hostBytes.length;
+    request.set(hostBytes, 5);
+    request[5 + hostBytes.length] = 0x00;
+    request[6 + hostBytes.length] = 0x50;
+    await withTimeout(writer.write(request), HEALTH_ATTEMPT_TIMEOUT_MS);
+    const connectResponse = await readSocks5ConnectResponse(reader, HEALTH_ATTEMPT_TIMEOUT_MS);
+    if (connectResponse[0] !== 0x05 || connectResponse[1] !== 0x00) {
+      try { writer.releaseLock(); reader.releaseLock(); socket.close(); } catch {}
+      return "connect_error";
+    }
+
+    const httpRequest = `GET ${target.path} HTTP/1.1\r\nHost: ${target.host}\r\nUser-Agent: RinnProxyHub/0.1\r\nConnection: close\r\n\r\n`;
+    await withTimeout(writer.write(new TextEncoder().encode(httpRequest)), HEALTH_ATTEMPT_TIMEOUT_MS);
     const response = await readHttpHeader(reader, HEALTH_ATTEMPT_TIMEOUT_MS);
     try { writer.releaseLock(); reader.releaseLock(); socket.close(); } catch {}
     return /^HTTP\/1\.[01] [23]\d\d/i.test(response) ? "ok" : "http_error";
@@ -581,6 +645,29 @@ async function readHttpHeader(reader, timeoutMs = HEALTH_TIMEOUT_MS) {
     text += decoder.decode(result.value, { stream: true });
   }
   return text;
+}
+
+async function readAtLeast(reader, minBytes, timeoutMs) {
+  const chunks = [];
+  let total = 0;
+  while (total < minBytes) {
+    const result = await withTimeout(reader.read(), timeoutMs);
+    if (!result.value) break;
+    chunks.push(result.value);
+    total += result.value.byteLength;
+  }
+  return concatUint8Arrays(chunks);
+}
+
+async function readSocks5ConnectResponse(reader, timeoutMs) {
+  const head = await readAtLeast(reader, 5, timeoutMs);
+  if (head.byteLength < 5) return head;
+  const atyp = head[3];
+  const addressLength = atyp === 0x01 ? 4 : atyp === 0x04 ? 16 : atyp === 0x03 ? head[4] : 0;
+  const totalLength = 4 + (atyp === 0x03 ? 1 : 0) + addressLength + 2;
+  if (head.byteLength >= totalLength) return head;
+  const rest = await readAtLeast(reader, totalLength - head.byteLength, timeoutMs);
+  return concatUint8Arrays([head, rest]);
 }
 
 async function listSources(env) {
