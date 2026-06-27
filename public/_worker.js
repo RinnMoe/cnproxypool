@@ -4,6 +4,7 @@ const VERSION = "0.1.0";
 const DEFAULT_TIMEOUT_MS = 8000;
 const HEALTH_TIMEOUT_MS = 6000;
 const HEALTH_ATTEMPT_TIMEOUT_MS = 3000;
+const HEALTH_CHECK_CONCURRENCY = 25;
 const HEALTH_CHECK_HOST = "api.ipify.org";
 const HEALTH_CHECK_PATH = "/";
 const HEALTH_CONNECT_HEADER_LIMIT = 8192;
@@ -258,18 +259,22 @@ async function checkHealth(env, maxChecks = MAX_HEALTH_CHECKS) {
     LIMIT ?
   `).bind(Math.max(1, Math.min(maxChecks, 5000))).all();
   let checked = 0;
-  for (const row of rows.results) {
-    const started = Date.now();
-    const status = await checkProxyWithTimeout(row);
-    const latency = (Date.now() - started) / 1000;
-    const ok = status === "ok";
-    await env.DB.prepare(`
-      UPDATE proxies
-      SET health_status = ?, check_latency_seconds = ?, last_checked_at = ?,
-          fail_count = fail_count + ?, success_count = success_count + ?
-      WHERE host = ? AND port = ?
-    `).bind(status, latency, epoch(), ok ? 0 : 1, ok ? 1 : 0, row.host, row.port).run();
-    checked += 1;
+  for (let index = 0; index < rows.results.length; index += HEALTH_CHECK_CONCURRENCY) {
+    const batchRows = rows.results.slice(index, index + HEALTH_CHECK_CONCURRENCY);
+    const updates = await Promise.all(batchRows.map(async (row) => {
+      const started = Date.now();
+      const status = await checkProxyWithTimeout(row);
+      const latency = (Date.now() - started) / 1000;
+      const ok = status === "ok";
+      return env.DB.prepare(`
+        UPDATE proxies
+        SET health_status = ?, check_latency_seconds = ?, last_checked_at = ?,
+            fail_count = fail_count + ?, success_count = success_count + ?
+        WHERE host = ? AND port = ?
+      `).bind(status, latency, epoch(), ok ? 0 : 1, ok ? 1 : 0, row.host, row.port);
+    }));
+    if (updates.length) await env.DB.batch(updates);
+    checked += updates.length;
   }
   return { checked, ...(await stats(env)) };
 }
@@ -284,10 +289,16 @@ async function checkProxyWithTimeout(row) {
 }
 
 async function checkProxy(row) {
-  const httpsStatus = await checkHttpsProxy(row);
-  if (httpsStatus === "ok") return "ok";
-  const httpStatus = await checkHttpProxy(row);
-  return httpStatus === "ok" ? "ok" : httpsStatus;
+  const [httpsStatus, httpStatus] = await Promise.all([checkHttpsProxy(row), checkHttpProxy(row)]);
+  if (httpsStatus === "ok" || httpStatus === "ok") return "ok";
+  return preferHealthStatus(httpsStatus, httpStatus);
+}
+
+function preferHealthStatus(...statuses) {
+  for (const status of ["tls_error", "http_error", "connect_error", "timeout", "failed"]) {
+    if (statuses.includes(status)) return status;
+  }
+  return statuses.find(Boolean) || "failed";
 }
 
 async function checkHttpsProxy(row) {
