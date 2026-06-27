@@ -20,6 +20,7 @@ const SOURCE_FALLBACK_STATUSES = new Set([403, 429, 520, 521, 522, 523, 524, 525
 const MAX_REFRESH_SOURCES_PER_TICK = 2;
 const SOURCE_CUSTOM_PREFIX = "custom_url:";
 const API_CACHE_SECONDS = 60;
+const RECENT_SUCCESS_SECONDS = 24 * 60 * 60;
 const CACHEABLE_GET_PATHS = new Set(["/api/v1/proxies", "/api/v1/proxies/select"]);
 
 const BUILTIN_SOURCES = [
@@ -693,7 +694,7 @@ async function listSources(env) {
 async function listProxies(env, params) {
   const where = [];
   const values = [];
-  if (truthy(params.get("healthy_only"))) where.push("health_status = 'ok'");
+  if (truthy(params.get("healthy_only"))) where.push(effectiveHealthySql());
   for (const [field, value] of [["province", params.get("province")], ["city", params.get("city")], ["scheme", params.get("scheme")], ["health_status", params.get("health_status")]]) {
     if (!value) continue;
     where.push(field === "province" || field === "city" ? `${field} LIKE ?` : `${field} = ?`);
@@ -708,7 +709,7 @@ async function listProxies(env, params) {
     ORDER BY last_checked_at IS NULL, last_checked_at DESC, check_latency_seconds IS NULL, check_latency_seconds ASC
     LIMIT ? OFFSET ?
   `).bind(...values, limit, offset).all();
-  return { items: rows.results.map(publicProxy), total: Number(total.total || 0) };
+  return { items: rows.results.map((row) => publicProxy(row)), total: Number(total.total || 0) };
 }
 
 async function selectProxy(env, params) {
@@ -728,7 +729,7 @@ async function selectProxy(env, params) {
 
 async function stats(env) {
   const [rows, maintenance] = await Promise.all([
-    env.DB.prepare("SELECT health_status, province, sources_json FROM proxies").all(),
+    env.DB.prepare("SELECT health_status, province, sources_json, last_seen_at, success_count FROM proxies").all(),
     maintenanceSchedule(env),
   ]);
   const by_source = {};
@@ -737,19 +738,20 @@ async function stats(env) {
   const health_by_source = {};
   for (const row of rows.results) {
     const status = row.health_status || "unchecked";
+    const effectiveStatus = isEffectivelyHealthy(row) ? "ok" : status;
     status_counts[status] = (status_counts[status] || 0) + 1;
     for (const source of safeJson(row.sources_json, [])) {
       by_source[source] = (by_source[source] || 0) + 1;
       health_by_source[source] ||= {};
-      health_by_source[source][status] = (health_by_source[source][status] || 0) + 1;
+      health_by_source[source][effectiveStatus] = (health_by_source[source][effectiveStatus] || 0) + 1;
     }
     const province = cleanRegion(row.province || "unscoped");
     by_province[province] = (by_province[province] || 0) + 1;
   }
   return {
     total: rows.results.length,
-    healthy: status_counts.ok || 0,
-    failed: rows.results.length - (status_counts.ok || 0) - (status_counts.unchecked || 0),
+    healthy: rows.results.filter(isEffectivelyHealthy).length,
+    failed: rows.results.filter((row) => !isEffectivelyHealthy(row) && (row.health_status || "unchecked") !== "unchecked").length,
     unchecked: status_counts.unchecked || 0,
     next_check_at: maintenance.next_check_at,
     next_check_in_seconds: maintenance.next_check_in_seconds,
@@ -758,6 +760,15 @@ async function stats(env) {
     status_counts,
     health_by_source,
   };
+}
+
+function effectiveHealthySql() {
+  const recentThreshold = epoch() - RECENT_SUCCESS_SECONDS;
+  return `(health_status = 'ok' OR (success_count > 0 AND COALESCE(last_seen_at, 0) >= ${recentThreshold}))`;
+}
+
+function isEffectivelyHealthy(row) {
+  return (row.health_status || "") === "ok" || (Number(row.success_count || 0) > 0 && Number(row.last_seen_at || 0) >= epoch() - RECENT_SUCCESS_SECONDS);
 }
 
 async function maintenanceSchedule(env) {
