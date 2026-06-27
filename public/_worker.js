@@ -2,14 +2,14 @@ import { connect } from "cloudflare:sockets";
 
 const VERSION = "0.1.0";
 const DEFAULT_TIMEOUT_MS = 8000;
-const HEALTH_TIMEOUT_MS = 15000;
-const HEALTH_ATTEMPT_TIMEOUT_MS = 5000;
-const HEALTH_CHECK_CONCURRENCY = 15;
+const HEALTH_TIMEOUT_MS = 6000;
+const HEALTH_ATTEMPT_TIMEOUT_MS = 3000;
+const HEALTH_CHECK_CONCURRENCY = 25;
 const HEALTH_CHECK_HOST = "api.ipify.org";
 const HEALTH_CHECK_PATH = "/";
 const HEALTH_CHECK_TARGETS = [
-  { host: "icanhazip.com", path: "/" },
   { host: "api.ipify.org", path: "/" },
+  { host: "icanhazip.com", path: "/" },
   { host: "ifconfig.me", path: "/ip" },
 ];
 const HEALTH_CONNECT_HEADER_LIMIT = 8192;
